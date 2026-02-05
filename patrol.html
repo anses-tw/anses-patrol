@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
+    <title>國小數位化巡堂紀錄系統 (純文字版)</title>
+    
+    <!-- React & Tailwind -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+        body { 
+            font-family: 'Noto Sans TC', sans-serif; 
+            background-color: #ffffff;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior-y: contain;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // ==========================================
+        //  設定區
+        // ==========================================
+        
+        // 1. Firebase 專案設定 (您的專屬金鑰)
+        const firebaseConfig = {
+            apiKey: "AIzaSyBU4ryHS_mh-MnN6-9yc92Y5-5Swc_Fj4k",
+            authDomain: "ansespatrol.firebaseapp.com",
+            projectId: "ansespatrol",
+            storageBucket: "ansespatrol.firebasestorage.app",
+            messagingSenderId: "480495157170",
+            appId: "1:480495157170:web:a04c5d1addbbadb5b92eab"
+        };
+
+        // 2. Google Apps Script 部署網址
+        // ★★★ 請在此填入新的 GAS 網址 ★★★
+        const LINE_PROXY_URL = ""; 
+
+        // ==========================================
+        //  系統初始化
+        // ==========================================
+        
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const db = firebase.firestore();
+
+        const { useState, useEffect, useMemo } = React;
+
+        // --- 常數設定 ---
+        const USERS = [
+            { id: 'principal', name: '校長', role: 'principal', color: 'bg-purple-600' },
+            { id: 'academic', name: '教務主任', role: 'director', color: 'bg-blue-600' },
+            { id: 'student', name: '學務主任', role: 'director', color: 'bg-green-600' },
+            { id: 'general', name: '總務主任', role: 'director', color: 'bg-orange-600' },
+        ];
+        const AREAS = ['低年級區', '中年級區', '高年級區', '專科教室', '操場', '廁所', '校園周邊'];
+        const PERIODS = ['早自修', '第一節', '第二節', '第三節', '第四節', '午休', '第五節', '第六節', '第七節', '放學'];
+
+        // --- 工具函式 ---
+
+        const sendLineNotify = async (message) => {
+            if (!LINE_PROXY_URL) {
+                console.log("尚未設定 Line Proxy URL");
+                return;
+            }
+            try {
+                // 修改：適應 Messaging API 的格式
+                const payload = { message: message };
+                await fetch(LINE_PROXY_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                console.log("Line 通知已發送");
+            } catch (error) {
+                console.error("Line 通知發送失敗:", error);
+            }
+        };
+
+        const downloadCSV = (records, dateStr) => {
+            if (!records || records.length === 0) {
+                alert('無資料可匯出');
+                return;
+            }
+            const headers = ['日期時間', '巡堂人員', '區域', '詳細地點', '時段', '狀態', '異常項目', '備註'];
+            const csvRows = records.map(r => {
+                const abnormalItems = r.items
+                    .flatMap(cat => cat.checks.filter(c => !c.isNormal))
+                    .map(c => `${c.label}:${c.value}`)
+                    .join('; ');
+                const row = [
+                    new Date(r.timestamp.seconds * 1000).toLocaleString(),
+                    r.user.name,
+                    r.area,
+                    r.locationDetail || '',
+                    r.period,
+                    r.status,
+                    abnormalItems || '無',
+                    r.note || ''
+                ];
+                return row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(',');
+            });
+            const csvContent = '\uFEFF' + [headers.join(','), ...csvRows].join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `巡堂紀錄_${dateStr}.csv`;
+            link.click();
+        };
+
+        const Icon = ({ name, size = 24, className = "" }) => {
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
+            return <i data-lucide={name} width={size} height={size} className={className}></i>;
+        };
+
+        // --- 主程式 ---
+        const App = () => {
+            const [currentPage, setCurrentPage] = useState('home');
+            const [currentUser, setCurrentUser] = useState(null);
+            const [records, setRecords] = useState([]);
+            const [isLoading, setIsLoading] = useState(false);
+            const [filterDate, setFilterDate] = useState(new Date().toISOString().split('T')[0]);
+
+            useEffect(() => {
+                const startOfDay = new Date(filterDate);
+                startOfDay.setHours(0,0,0,0);
+                const endOfDay = new Date(filterDate);
+                endOfDay.setHours(23,59,59,999);
+
+                const query = db.collection('patrol_records')
+                    .where('timestamp', '>=', startOfDay)
+                    .where('timestamp', '<=', endOfDay)
+                    .orderBy('timestamp', 'desc');
+
+                const unsubscribe = query.onSnapshot((snapshot) => {
+                    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setRecords(data);
+                }, (error) => {
+                    console.error("讀取失敗:", error);
+                    if (error.code === 'permission-denied') alert("權限不足，請檢查 Firestore 規則");
+                });
+                return () => unsubscribe();
+            }, [filterDate]);
+
+            const handleSubmitRecord = async (newRecord) => {
+                setIsLoading(true);
+                try {
+                    const recordToSave = {
+                        timestamp: new Date(), 
+                        user: currentUser,
+                        area: newRecord.area,
+                        locationDetail: newRecord.locationDetail,
+                        period: newRecord.period,
+                        items: newRecord.items,
+                        note: newRecord.note,
+                        status: newRecord.hasAbnormal ? '異常待處理' : '正常',
+                        hasAbnormal: newRecord.hasAbnormal
+                    };
+
+                    await db.collection('patrol_records').add(recordToSave);
+
+                    if (newRecord.hasAbnormal) {
+                        const locationStr = newRecord.locationDetail ? `${newRecord.area} (${newRecord.locationDetail})` : newRecord.area;
+                        let msg = `⚠️ **巡堂異常通報**\n`;
+                        msg += `------------------\n`;
+                        msg += `巡堂者：${currentUser.name}\n`;
+                        msg += `地點：${locationStr}\n`;
+                        msg += `------------------\n`;
+                        msg += `【異常項目】\n`;
+                        newRecord.items.forEach(cat => {
+                            cat.checks.forEach(check => {
+                                if (!check.isNormal) msg += `🔴 ${check.label}：${check.value}\n`;
+                            });
+                        });
+                        if (newRecord.note) msg += `\n說明：${newRecord.note}`;
+                        sendLineNotify(msg);
+                    }
+
+                    alert("紀錄已上傳成功！");
+                    setCurrentPage('list');
+                } catch (error) {
+                    console.error(error);
+                    alert("上傳失敗：" + error.message);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen pb-20">
+                    <header className="bg-white sticky top-0 z-10 border-b border-gray-200">
+                        <div className="max-w-3xl mx-auto px-4 py-3 flex justify-between items-center">
+                            <h1 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                                <Icon name="clipboard-check" className="text-blue-600" />
+                                國小數位巡堂
+                            </h1>
+                            {currentUser && (
+                                <div className="text-sm font-medium text-gray-600 bg-gray-100 px-3 py-1 rounded-full">
+                                    {currentUser.name}
+                                </div>
+                            )}
+                        </div>
+                    </header>
+
+                    <main className="max-w-3xl mx-auto p-4">
+                        {isLoading && (
+                            <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50">
+                                <div className="bg-white p-6 rounded-lg shadow-xl flex flex-col items-center">
+                                    <Icon name="loader-2" className="animate-spin text-blue-600 mb-2" size={32} />
+                                    <p>資料處理中...</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {currentPage === 'home' && <Home onLogin={(u)=>{setCurrentUser(u); setCurrentPage('form');}} />}
+                        {currentPage === 'form' && <PatrolForm user={currentUser} onSubmit={handleSubmitRecord} />}
+                        {currentPage === 'list' && (
+                            <RecordList 
+                                records={records} 
+                                filterDate={filterDate} 
+                                setFilterDate={setFilterDate} 
+                                onDownload={() => downloadCSV(records, filterDate)}
+                            />
+                        )}
+                    </main>
+
+                    {currentPage !== 'home' && (
+                        <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 safe-area-pb z-20">
+                            <div className="max-w-3xl mx-auto flex justify-around">
+                                <button onClick={() => setCurrentPage('form')} className={`flex-1 py-3 flex flex-col items-center gap-1 ${currentPage === 'form' ? 'text-blue-600' : 'text-gray-400'}`}>
+                                    <Icon name="pen-tool" size={20} /> <span className="text-xs">巡堂填寫</span>
+                                </button>
+                                <button onClick={() => setCurrentPage('list')} className={`flex-1 py-3 flex flex-col items-center gap-1 ${currentPage === 'list' ? 'text-blue-600' : 'text-gray-400'}`}>
+                                    <Icon name="list" size={20} /> <span className="text-xs">紀錄查詢</span>
+                                </button>
+                                <button onClick={() => {setCurrentUser(null); setCurrentPage('home');}} className="flex-1 py-3 flex flex-col items-center gap-1 text-gray-400">
+                                    <Icon name="log-out" size={20} /> <span className="text-xs">登出</span>
+                                </button>
+                            </div>
+                        </nav>
+                    )}
+                </div>
+            );
+        };
+
+        const Home = ({ onLogin }) => (
+            <div className="flex flex-col items-center justify-center min-h-[80vh]">
+                <div className="text-center mb-8">
+                    <div className="bg-blue-100 p-4 rounded-full inline-block mb-4"><Icon name="school" size={48} className="text-blue-600" /></div>
+                    <h2 className="text-2xl font-bold text-gray-800">歡迎使用巡堂系統</h2>
+                    <p className="text-gray-500 mt-2">請選擇您的身分開始作業</p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-md">
+                    {USERS.map(user => (
+                        <button key={user.id} onClick={() => onLogin(user)} className={`${user.color} text-white p-4 rounded-xl shadow-lg hover:opacity-90 transition transform hover:scale-105 flex items-center gap-4 text-left`}>
+                            <div className="bg-white/20 p-3 rounded-full"><Icon name="user" size={24} className="text-white" /></div>
+                            <div><div className="font-bold text-lg">{user.name}</div><div className="text-white/80 text-sm">點擊進入</div></div>
+                        </button>
+                    ))}
+                </div>
+                <div className="mt-12 text-center text-gray-400 text-sm"><p>系統狀態：正式版 (Messaging API)</p></div>
+            </div>
+        );
+
+        const PatrolForm = ({ user, onSubmit }) => {
+            const [area, setArea] = useState(AREAS[0]);
+            const [period, setPeriod] = useState(PERIODS[1]);
+            const [locationDetail, setLocationDetail] = useState('');
+            const [formData, setFormData] = useState({});
+            const [note, setNote] = useState('');
+            
+            const checklistConfig = useMemo(() => [
+                { title: '教務向 (教學)', icon: 'book-open', color: 'text-blue-600', items: [{ id: 't_attend', label: '教師出勤', options: ['準時', '遲到', '未到'], default: '準時' }, { id: 't_teach', label: '教學狀況', options: ['正常', '需關注'], default: '正常' }, { id: 'c_mood', label: '班級氣氛', options: ['專注', '浮躁'], default: '專注' }] },
+                { title: '學務向 (秩序)', icon: 'users', color: 'text-green-600', items: [{ id: 's_order', label: '學生秩序', options: ['良好', '吵鬧', '走廊奔跑'], default: '良好' }, { id: 'env_clean', label: '環境整潔', options: ['整潔', '髒亂'], default: '整潔' }, { id: 's_attend', label: '出缺席', options: ['全到', '有缺席'], default: '全到' }] },
+                { title: '總務向 (設施)', icon: 'wrench', color: 'text-orange-600', items: [{ id: 'fac_water', label: '水電門窗', options: ['正常', '損壞'], default: '正常' }, { id: 'fac_light', label: '照明設備', options: ['正常', '故障'], default: '正常' }, { id: 'safe_zone', label: '校園死角', options: ['無異狀', '有校外人士', '堆積雜物'], default: '無異狀' }] }
+            ], []);
+
+            useEffect(() => {
+                const initialData = {};
+                checklistConfig.forEach(cat => cat.items.forEach(item => initialData[item.id] = item.default));
+                setFormData(initialData);
+            }, [checklistConfig]);
+
+            const handleSubmit = () => {
+                let hasAbnormal = false;
+                const resultItems = checklistConfig.map(cat => ({
+                    category: cat.title,
+                    checks: cat.items.map(item => {
+                        const val = formData[item.id];
+                        const isNormal = ['準時', '正常', '專注', '良好', '整潔', '全到', '無異狀'].includes(val);
+                        if (!isNormal) hasAbnormal = true;
+                        return { label: item.label, value: val, isNormal };
+                    })
+                }));
+                onSubmit({ area, locationDetail, period, items: resultItems, note, hasAbnormal });
+            };
+
+            return (
+                <div className="space-y-6 pb-10">
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                        <h3 className="font-bold text-gray-700 mb-4 flex items-center gap-2"><Icon name="map-pin" size={18} /> 巡查資訊</h3>
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                            <div><label className="block text-xs text-gray-500 mb-1">區域</label><select className="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm" value={area} onChange={(e) => setArea(e.target.value)}>{AREAS.map(a => <option key={a} value={a}>{a}</option>)}</select></div>
+                            <div><label className="block text-xs text-gray-500 mb-1">時段</label><select className="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm" value={period} onChange={(e) => setPeriod(e.target.value)}>{PERIODS.map(p => <option key={p} value={p}>{p}</option>)}</select></div>
+                        </div>
+                        <div><label className="block text-xs text-gray-500 mb-1">詳細地點 (選填)</label><input type="text" placeholder="例如：302班走廊..." className="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm" value={locationDetail} onChange={(e) => setLocationDetail(e.target.value)} /></div>
+                    </div>
+                    
+                    {checklistConfig.map((category, idx) => (
+                        <div key={idx} className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                            <h3 className={`font-bold mb-4 flex items-center gap-2 ${category.color}`}><Icon name={category.icon} size={18} /> {category.title}</h3>
+                            <div className="space-y-4">
+                                {category.items.map(item => (
+                                    <div key={item.id} className="border-b border-gray-200 pb-3 last:border-0 last:pb-0">
+                                        <div className="flex justify-between items-center mb-2"><span className="text-gray-700 font-medium">{item.label}</span></div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {item.options.map(opt => {
+                                                const isSelected = formData[item.id] === opt;
+                                                let btnClass = "bg-gray-100 text-gray-600 border-gray-200";
+                                                if (isSelected) btnClass = ['遲到','未到','需關注','浮躁','吵鬧','髒亂','有缺席','損壞','故障','有校外人士'].some(k => opt.includes(k)) ? "bg-red-100 text-red-700 border-red-300 ring-1 ring-red-300" : "bg-green-100 text-green-700 border-green-300 ring-1 ring-green-300";
+                                                return <button key={opt} onClick={() => setFormData(p => ({ ...p, [item.id]: opt }))} className={`px-4 py-2 rounded-lg text-sm border transition-all ${btnClass}`}>{opt}</button>
+                                            })}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ))}
+
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                        <h3 className="font-bold text-gray-700 mb-4 flex items-center gap-2"><Icon name="alert-triangle" size={18} /> 異常說明</h3>
+                        <div className="space-y-4">
+                            <textarea placeholder="若有異常請在此簡述..." className="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm h-24 resize-none" value={note} onChange={(e) => setNote(e.target.value)}></textarea>
+                        </div>
+                    </div>
+                    <button onClick={handleSubmit} className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold text-lg shadow-lg hover:bg-blue-700 active:scale-95 transition"><Icon name="send" className="inline mr-2"/> 送出紀錄</button>
+                </div>
+            );
+        };
+
+        const RecordList = ({ records, filterDate, setFilterDate, onDownload }) => {
+            const abnormalCount = records.filter(r => r.hasAbnormal).length;
+            return (
+                <div className="space-y-4 pb-20">
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 mb-4">
+                        <div className="flex justify-between items-center mb-3">
+                            <h2 className="font-bold text-gray-800 flex items-center gap-2"><Icon name="calendar" size={20} className="text-blue-600"/> 紀錄查詢</h2>
+                            <button onClick={onDownload} disabled={records.length === 0} className={`px-3 py-1.5 rounded-lg text-sm flex items-center gap-1 transition shadow-sm ${records.length === 0 ? 'bg-gray-200 text-gray-400' : 'bg-green-600 text-white hover:bg-green-700'}`}><Icon name="download" size={16} /> 匯出 Excel</button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <input type="date" className="flex-1 bg-gray-50 border border-gray-200 rounded-lg p-2 text-sm" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} />
+                            <div className="flex gap-2 text-xs"><span className="bg-gray-100 px-2 py-1 rounded text-gray-600">總計: {records.length}</span><span className="bg-red-50 px-2 py-1 rounded text-red-600">異常: {abnormalCount}</span></div>
+                        </div>
+                    </div>
+                    {records.length === 0 ? (
+                         <div className="flex flex-col items-center justify-center py-10 text-gray-400 bg-white rounded-xl border border-gray-200 border-dashed"><Icon name="search-x" size={48} className="mb-2 opacity-50" /><p>查無紀錄</p></div>
+                    ) : (
+                        records.map(record => (
+                            <div key={record.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 relative overflow-hidden">
+                                <div className={`absolute left-0 top-0 bottom-0 w-1 ${record.hasAbnormal ? 'bg-red-500' : 'bg-green-500'}`}></div>
+                                <div className="pl-3">
+                                    <div className="flex justify-between items-start mb-2">
+                                        <div>
+                                            <div className="font-bold text-gray-800 text-lg flex items-center gap-2">{record.area} {record.locationDetail && <span className="text-sm font-normal text-gray-500 bg-gray-100 px-2 py-0.5 rounded">{record.locationDetail}</span>}</div>
+                                            <div className="text-sm text-gray-500 mt-2 flex items-center gap-2"><Icon name="user" size={14} /> {record.user.name} <span className="text-gray-300">|</span> {new Date(record.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                                        </div>
+                                        <span className={`px-3 py-1 rounded-full text-xs font-bold ${record.hasAbnormal ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{record.status}</span>
+                                    </div>
+                                    {record.hasAbnormal && (
+                                        <div className="mt-3 bg-red-50 p-3 rounded-lg border border-red-100">
+                                            <p className="text-xs text-red-500 font-bold mb-1 flex items-center gap-1"><Icon name="alert-circle" size={12} /> 異常項目</p>
+                                            <ul className="text-sm text-gray-700 space-y-1">{record.items.map(cat => cat.checks.filter(c => !c.isNormal).map((c, i) => <li key={i}>• {c.label}: <span className="font-medium text-red-600">{c.value}</span></li>))}</ul>
+                                        </div>
+                                    )}
+                                    {record.note && <div className="mt-3 text-sm text-gray-600 bg-gray-50 p-2 rounded">備註：{record.note}</div>}
+                                </div>
+                            </div>
+                        ))
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
