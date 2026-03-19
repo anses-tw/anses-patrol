@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>南興國小 - 巡堂紀錄區間匯出</title>
+    <!-- 引入 Tailwind CSS 美化介面 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 SheetJS 用來產生 Excel 檔案 -->
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+
+    <div class="bg-white p-8 rounded-xl shadow-lg max-w-md w-full">
+        <h1 class="text-2xl font-bold text-gray-800 mb-6 text-center">📅 巡堂紀錄匯出後台</h1>
+        
+        <div class="space-y-4">
+            <!-- 開始日期 -->
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">開始日期 (Start Date)</label>
+                <input type="date" id="startDate" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-blue-500 outline-none">
+            </div>
+
+            <!-- 結束日期 -->
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">結束日期 (End Date)</label>
+                <input type="date" id="endDate" class="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-blue-500 outline-none">
+            </div>
+
+            <!-- 狀態提示訊息區 -->
+            <div id="statusMessage" class="hidden rounded-lg p-3 text-sm font-medium text-center"></div>
+
+            <!-- 下載按鈕 -->
+            <button id="downloadBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 mt-4">
+                📥 匯出 Excel 報表
+            </button>
+        </div>
+    </div>
+
+    <!-- Firebase 與匯出邏輯 -->
+    <script type="module">
+        // 1. 引入 Firebase 模組
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+        import { getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+
+        // ⚠️ 【重要步驟】：請把這裡替換成您原本 patrol.html 裡面的 firebaseConfig
+        const firebaseConfig = {
+            apiKey: "請貼上您的 apiKey",
+            authDomain: "請貼上您的 authDomain",
+            projectId: "請貼上您的 projectId",
+            storageBucket: "請貼上您的 storageBucket",
+            messagingSenderId: "請貼上您的 messagingSenderId",
+            appId: "請貼上您的 appId"
+        };
+
+        // 初始化 Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // 取得介面元素
+        const startDateInput = document.getElementById('startDate');
+        const endDateInput = document.getElementById('endDate');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusMessage = document.getElementById('statusMessage');
+
+        // 顯示訊息的函數
+        function showMessage(msg, type) {
+            statusMessage.textContent = msg;
+            statusMessage.className = `rounded-lg p-3 text-sm font-medium text-center block ${type === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`;
+        }
+
+        // 綁定下載按鈕事件
+        downloadBtn.addEventListener('click', async () => {
+            const startDate = startDateInput.value;
+            const endDate = endDateInput.value;
+
+            if (!startDate || !endDate) {
+                showMessage('⚠️ 請完整選擇「開始日期」與「結束日期」', 'error');
+                return;
+            }
+
+            if (startDate > endDate) {
+                showMessage('⚠️ 開始日期不能晚於結束日期', 'error');
+                return;
+            }
+
+            try {
+                // 改變按鈕狀態
+                downloadBtn.textContent = '資料抓取中...';
+                downloadBtn.disabled = true;
+                downloadBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                statusMessage.classList.add('hidden');
+
+                // 2. 從 Firebase 抓取所有巡堂紀錄
+                // ⚠️ 備註：如果您的資料夾名稱不是 'patrols'，請在這裡修改
+                const querySnapshot = await getDocs(collection(db, "patrols"));
+                let records = [];
+
+                querySnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    // 3. 在這裡進行日期區間過濾 (假設您的日期欄位叫做 'date')
+                    if (data.date >= startDate && data.date <= endDate) {
+                        records.push(data);
+                    }
+                });
+
+                if (records.length === 0) {
+                    showMessage(`這個區間 (${startDate} ~ ${endDate}) 沒有任何巡堂紀錄。`, 'error');
+                    resetButton();
+                    return;
+                }
+
+                // 4. 將資料轉換為 Excel 格式 (確保欄位名稱是中文)
+                // ⚠️ 備註：這裡的 data.date, data.time 請對應您資料庫實際的欄位名稱
+                const excelData = records.map(record => ({
+                    "日期": record.date || "",
+                    "時間": record.time || "",
+                    "巡視人員": record.patroller || record.name || "",
+                    "巡視地點": record.location || "",
+                    "狀況紀錄": record.status || record.condition || "",
+                    "備註說明": record.notes || record.remark || ""
+                }));
+
+                // 5. 產生並下載 Excel
+                const worksheet = XLSX.utils.json_to_sheet(excelData);
+                const workbook = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(workbook, worksheet, "巡堂紀錄");
+                
+                // 設定檔案名稱
+                const fileName = `巡堂紀錄_${startDate}_至_${endDate}.xlsx`;
+                XLSX.writeFile(workbook, fileName);
+
+                showMessage(`✅ 成功匯出 ${records.length} 筆紀錄！`, 'success');
+
+            } catch (error) {
+                console.error("匯出失敗: ", error);
+                showMessage('❌ 匯出發生錯誤，請檢查資料庫連線或欄位設定。', 'error');
+            } finally {
+                resetButton();
+            }
+        });
+
+        function resetButton() {
+            downloadBtn.textContent = '📥 匯出 Excel 報表';
+            downloadBtn.disabled = false;
+            downloadBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+    </script>
+</body>
+</html>
