@@ -45,7 +45,6 @@
         };
 
         // 2. Google Apps Script 部署網址
-        // ★★★ 請在此填入您的 GAS 網址 (結尾是 /exec) ★★★
         const LINE_PROXY_URL = "https://script.google.com/macros/s/AKfycbxrJoO9fTyTRX2yvEqrKqkDSD-LE32acUi-qyDabcg5e9dE66zycJiyIShMHP0JU_YX/exec"; 
 
         // ==========================================
@@ -60,7 +59,6 @@
         const { useState, useEffect, useMemo } = React;
 
         // --- 常數設定 ---
-        // 在這裡新增了「教學組長」
         const USERS = [
             { id: 'principal', name: '校長', role: 'principal', color: 'bg-purple-600' },
             { id: 'academic', name: '教務主任', role: 'director', color: 'bg-blue-600' },
@@ -72,7 +70,6 @@
         const PERIODS = ['早自修', '第一節', '第二節', '第三節', '第四節', '午休', '第五節', '第六節', '第七節', '放學'];
 
         // --- 工具函式 ---
-
         const sendLineNotify = async (message) => {
             if (!LINE_PROXY_URL) {
                 console.log("尚未設定 Line Proxy URL");
@@ -90,37 +87,6 @@
             } catch (error) {
                 console.error("Line 通知發送失敗:", error);
             }
-        };
-
-        const downloadCSV = (records, dateStr) => {
-            if (!records || records.length === 0) {
-                alert('無資料可匯出');
-                return;
-            }
-            const headers = ['日期時間', '巡堂人員', '區域', '詳細地點', '時段', '狀態', '異常項目', '備註'];
-            const csvRows = records.map(r => {
-                const abnormalItems = r.items
-                    .flatMap(cat => cat.checks.filter(c => !c.isNormal))
-                    .map(c => `${c.label}:${c.value}`)
-                    .join('; ');
-                const row = [
-                    new Date(r.timestamp.seconds * 1000).toLocaleString(),
-                    r.user.name,
-                    r.area,
-                    r.locationDetail || '',
-                    r.period,
-                    r.status,
-                    abnormalItems || '無',
-                    r.note || ''
-                ];
-                return row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(',');
-            });
-            const csvContent = '\uFEFF' + [headers.join(','), ...csvRows].join('\n');
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = `巡堂紀錄_${dateStr}.csv`;
-            link.click();
         };
 
         const Icon = ({ name, size = 24, className = "" }) => {
@@ -176,7 +142,7 @@
 
                     if (newRecord.hasAbnormal) {
                         const locationStr = newRecord.locationDetail ? `${newRecord.area} (${newRecord.locationDetail})` : newRecord.area;
-                        let msg = `⚠️ **巡堂異常通報**\n`;
+                        let msg = `⚠️ 巡堂異常通報\n`;
                         msg += `------------------\n`;
                         msg += `巡堂者：${currentUser.name}\n`;
                         msg += `地點：${locationStr}\n`;
@@ -234,7 +200,6 @@
                                 records={records} 
                                 filterDate={filterDate} 
                                 setFilterDate={setFilterDate} 
-                                onDownload={() => downloadCSV(records, filterDate)}
                             />
                         )}
                     </main>
@@ -353,14 +318,55 @@
             );
         };
 
-        const RecordList = ({ records, filterDate, setFilterDate, onDownload }) => {
+        const RecordList = ({ records, filterDate, setFilterDate }) => {
             const abnormalCount = records.filter(r => r.hasAbnormal).length;
+            const [showPwdModal, setShowPwdModal] = useState(false);
+            const [pwdInput, setPwdInput] = useState('');
+            const [pwdError, setPwdError] = useState(false);
+
+            const handlePwdSubmit = () => {
+                if (pwdInput === '1234') {
+                    setShowPwdModal(false);
+                    setPwdInput('');
+                    setPwdError(false);
+                    // 密碼正確，開啟後台匯出網頁
+                    window.open('admin_export.html', '_blank');
+                } else {
+                    setPwdError(true);
+                    setPwdInput('');
+                }
+            };
+
             return (
                 <div className="space-y-4 pb-20">
+                    {/* 密碼驗證彈出視窗 */}
+                    {showPwdModal && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] px-4">
+                            <div className="bg-white p-6 rounded-xl shadow-xl w-full max-w-sm">
+                                <h3 className="text-xl font-bold text-gray-800 mb-4 text-center flex justify-center items-center gap-2"><Icon name="lock" size={24} className="text-indigo-600"/>管理員身分驗證</h3>
+                                <p className="text-sm text-gray-600 mb-4 text-center">請輸入密碼以開啟巡堂紀錄匯出系統</p>
+                                <input 
+                                    type="password" 
+                                    value={pwdInput}
+                                    onChange={(e) => setPwdInput(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && handlePwdSubmit()}
+                                    className="w-full border border-gray-300 p-3 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none mb-2 text-center text-xl tracking-widest" 
+                                    placeholder="輸入密碼"
+                                    autoFocus
+                                />
+                                {pwdError && <p className="text-red-500 text-sm font-bold mb-4 text-center">❌ 密碼錯誤，請重新輸入！</p>}
+                                <div className="flex justify-between gap-3 mt-6">
+                                    <button onClick={() => {setShowPwdModal(false); setPwdError(false); setPwdInput('');}} className="w-1/2 py-2 bg-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-300 transition duration-200">取消</button>
+                                    <button onClick={handlePwdSubmit} className="w-1/2 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition duration-200">確認前往</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 mb-4">
                         <div className="flex justify-between items-center mb-3">
                             <h2 className="font-bold text-gray-800 flex items-center gap-2"><Icon name="calendar" size={20} className="text-blue-600"/> 紀錄查詢</h2>
-                            <button onClick={onDownload} disabled={records.length === 0} className={`px-3 py-1.5 rounded-lg text-sm flex items-center gap-1 transition shadow-sm ${records.length === 0 ? 'bg-gray-200 text-gray-400' : 'bg-green-600 text-white hover:bg-green-700'}`}><Icon name="download" size={16} /> 匯出 Excel</button>
+                            <button onClick={() => setShowPwdModal(true)} className="px-3 py-1.5 rounded-lg text-sm flex items-center gap-1 transition shadow-sm bg-indigo-600 text-white hover:bg-indigo-700"><Icon name="database" size={16} /> 區間匯出</button>
                         </div>
                         <div className="flex items-center gap-2">
                             <input type="date" className="flex-1 bg-gray-50 border border-gray-200 rounded-lg p-2 text-sm" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} />
