@@ -91,46 +91,60 @@
                 downloadBtn.classList.add('opacity-50', 'cursor-not-allowed');
                 statusMessage.classList.add('hidden');
 
-                // 2. 從 Firebase 抓取所有巡堂紀錄
-                // ⚠️ 備註：如果您的資料夾名稱不是 'patrols'，請在這裡修改
-                const querySnapshot = await getDocs(collection(db, "patrols"));
-                let records = [];
+                // 2. 從 Firebase 抓取所有巡堂紀錄 (修正為您實際的資料夾名稱 patrol_records)
+                const querySnapshot = await getDocs(collection(db, "patrol_records"));
+                let excelData = [];
 
                 querySnapshot.forEach((doc) => {
                     const data = doc.data();
-                    // 3. 在這裡進行日期區間過濾 (假設您的日期欄位叫做 'date')
-                    if (data.date >= startDate && data.date <= endDate) {
-                        records.push(data);
+                    
+                    // 確保該筆資料有 timestamp 欄位才進行處理
+                    if (data.timestamp) {
+                        // 將 Firebase 的 timestamp 轉換為 JavaScript 的 Date 物件
+                        const recordDateObj = data.timestamp.toDate();
+                        
+                        // 取得 YYYY-MM-DD 格式用來與輸入的日期區間比對
+                        const yyyy = recordDateObj.getFullYear();
+                        const mm = String(recordDateObj.getMonth() + 1).padStart(2, '0');
+                        const dd = String(recordDateObj.getDate()).padStart(2, '0');
+                        const recordDateStr = `${yyyy}-${mm}-${dd}`;
+                        
+                        // 取得具體的時分秒供 Excel 報表顯示
+                        const recordTimeStr = recordDateObj.toLocaleTimeString('zh-TW', { hour12: false });
+
+                        // 3. 判斷是否在使用者選取的日期區間內
+                        if (recordDateStr >= startDate && recordDateStr <= endDate) {
+                            // 根據您實際的資料庫欄位名稱，對應寫入 Excel 陣列中
+                            excelData.push({
+                                "日期": recordDateStr,
+                                "時間": recordTimeStr,
+                                "節次": data.period || "",
+                                "巡視地點": data.locationDetail || "",
+                                "狀況紀錄": data.status || "",
+                                "備註說明": data.note || "",
+                                "巡視人員": (data.user && data.user.name) ? data.user.name : "",
+                                "身分": (data.user && data.user.role) ? data.user.role : ""
+                            });
+                        }
                     }
                 });
 
-                if (records.length === 0) {
+                if (excelData.length === 0) {
                     showMessage(`這個區間 (${startDate} ~ ${endDate}) 沒有任何巡堂紀錄。`, 'error');
                     resetButton();
                     return;
                 }
 
-                // 4. 將資料轉換為 Excel 格式 (確保欄位名稱是中文)
-                // ⚠️ 備註：這裡的 data.date, data.time 請對應您資料庫實際的欄位名稱
-                const excelData = records.map(record => ({
-                    "日期": record.date || "",
-                    "時間": record.time || "",
-                    "巡視人員": record.patroller || record.name || "",
-                    "巡視地點": record.location || "",
-                    "狀況紀錄": record.status || record.condition || "",
-                    "備註說明": record.notes || record.remark || ""
-                }));
-
-                // 5. 產生並下載 Excel
+                // 4. 產生並下載 Excel
                 const worksheet = XLSX.utils.json_to_sheet(excelData);
                 const workbook = XLSX.utils.book_new();
                 XLSX.utils.book_append_sheet(workbook, worksheet, "巡堂紀錄");
                 
                 // 設定檔案名稱
-                const fileName = `巡堂紀錄_${startDate}_至_${endDate}.xlsx`;
+                const fileName = `南興國小巡堂紀錄_${startDate}_至_${endDate}.xlsx`;
                 XLSX.writeFile(workbook, fileName);
 
-                showMessage(`✅ 成功匯出 ${records.length} 筆紀錄！`, 'success');
+                showMessage(`✅ 成功匯出 ${excelData.length} 筆紀錄！`, 'success');
 
             } catch (error) {
                 console.error("匯出失敗: ", error);
